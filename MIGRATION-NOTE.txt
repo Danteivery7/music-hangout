@@ -1,0 +1,1 @@
+Temporary migration marker. MusicRoomV2 is the active room namespace; the original MusicRoom namespace remains declared for one safe deployment before retirement.
