@@ -20,7 +20,7 @@
   "exports": {
     "MusicRoom": {
       "type": "durable-object",
-      "state": "deleted"
+      "storage": "sqlite"
     },
     "MusicRoomV2": {
       "type": "durable-object",

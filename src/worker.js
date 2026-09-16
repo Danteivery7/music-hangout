@@ -97,7 +97,7 @@ export default {
           title: item.snippet.title,
           channel: item.snippet.channelTitle || "YouTube",
           thumbnail:
-            item.snippet.thumbnails?.medium?.url ||
+            item.snnippet.thumbnails?.medium?.url ||
             item.snippet.thumbnails?.high?.url ||
             item.snippet.thumbnails?.default?.url ||
             "",
@@ -418,3 +418,6 @@ export class MusicRoomV2 extends DurableObject {
     await this.markRoomEmpty(state, socket);
   }
 }
+
+// Temporary compatibility export for the original namespace. The ROOMS binding
+// points at MusicRoomV‹ÛÈ™]È›ÛÛ\È\ÙHHÙ[‹XÛX[š[™È˜[Y\ÜXÙKˆÙY\[™Â‹ËÈ\È^Ü]™HXZÙ\ÈHš\œİZYÜ˜][Ûˆ›Û‹Y\İXİ]™NÈHÛ˜[Y\ÜXÙB‹ËÈØ[ˆ™H™]\™Y[ˆHÙ\\˜]H\Ş[Y[Y\ˆŒˆ\ÈÛÛ™š\›YYX[K‚™^ÜÛ\ÜÈ]\ÚXÔ›ÛÛH^[™È]\ÚXÔ›ÛÛUŒˆßB

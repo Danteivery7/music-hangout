@@ -1,1 +1,0 @@
-Safe migration is being staged so the original room namespace stays live for one deployment while MusicRoomV2 becomes the active self-cleaning namespace.
