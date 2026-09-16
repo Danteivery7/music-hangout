@@ -64,10 +64,17 @@ When importing this GitHub repository into Cloudflare Workers Builds:
 - Install command: `npm install`
 - Deploy command: `npm run deploy`
 
-The `wrangler.jsonc` file defines the Worker entry point, static assets, SPA routing, and `MusicRoom` Durable Object binding.
+The `wrangler.jsonc` file defines the Worker entry point, static assets, SPA routing, and `MusicRoomV2` Durable Object binding.
 
 ## Notes
 
 - Browsers may require one click before they allow audio autoplay. The room includes a **Start listening** gate for that reason.
 - Playback uses the official YouTube iframe player. The application does not download, extract, or re-host YouTube audio.
-- Rooms persist their queue/playback state in Durable Object storage. Participant presence is derived from active WebSocket connections.
+- Rooms persist their queue/playback state only while active or during the 30-minute empty-room grace period. Participant presence is derived from active WebSocket connections.
+
+
+## Room lifecycle
+
+Rooms are temporary. When the last listener leaves, playback is paused and the room gets a 30-minute grace period. If nobody rejoins before that timer ends, the Durable Object deletes all stored room state, including its queue and alarm. Rejoining during the grace period cancels cleanup.
+
+The `MusicRoomV2` namespace intentionally replaces and deletes the original `MusicRoom` Durable Object namespace on deployment, clearing the early test rooms created before automatic cleanup existed.

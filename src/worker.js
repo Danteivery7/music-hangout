@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 
 const ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
+const ROOM_IDLE_TTL_MS = 30 * 60 * 1000;
 
 function json(data, init = {}) {
   return new Response(JSON.stringify(data), {
@@ -133,7 +134,7 @@ export default {
   },
 };
 
-export class MusicRoom extends DurableObject {
+export class MusicRoomV2 extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.ctx = ctx;
@@ -199,6 +200,7 @@ export class MusicRoom extends DurableObject {
       const state = {
         roomCode: roomCode || fallbackCode,
         createdAt: Date.now(),
+        emptySince: Date.now(),
         queue: [],
         current: null,
         playback: {
@@ -208,6 +210,7 @@ export class MusicRoom extends DurableObject {
         },
       };
       await this.saveState(state);
+      await this.ctx.storage.setAlarm(state.emptySince + ROOM_IDLE_TTL_MS);
       return new Response(null, { status: 201 });
     }
 
@@ -218,7 +221,7 @@ export class MusicRoom extends DurableObject {
     }
 
     if (url.pathname === "/ws") {
-      const state = await this.getState();
+      let state = await this.getState();
       if (!state) return new Response("Room not found", { status: 404 });
 
       const pair = new WebSocketPair();
@@ -231,6 +234,13 @@ export class MusicRoom extends DurableObject {
 
       this.ctx.acceptWebSocket(server);
       server.serializeAttachment(participant);
+
+      if (state.emptySince != null) {
+        state.emptySince = null;
+        await this.saveState(state);
+      }
+      await this.ctx.storage.deleteAlarm();
+
       server.send(JSON.stringify({ type: "welcome", participantId: participant.id }));
       this.broadcast(state);
 
@@ -238,6 +248,55 @@ export class MusicRoom extends DurableObject {
     }
 
     return new Response("Not found", { status: 404 });
+  }
+
+  connectedCount(except = null) {
+    return this.ctx
+      .getWebSockets()
+      .filter((socket) => socket !== except && socket.readyState === WebSocket.OPEN).length;
+  }
+
+  async markRoomEmpty(state, except = null) {
+    if (!state || this.connectedCount(except) > 0) return;
+
+    const now = Date.now();
+    if (state.current && state.playback.status === "playing") {
+      const elapsedMs = Math.max(0, now - state.playback.startedAt);
+      state.playback = { status: "paused", startedAt: null, pausedAt: elapsedMs / 1000 };
+    }
+
+    state.emptySince = now;
+    await this.saveState(state);
+    await this.ctx.storage.setAlarm(now + ROOM_IDLE_TTL_MS);
+  }
+
+  async alarm() {
+    const state = await this.getState();
+    if (!state) return;
+
+    if (this.connectedCount() > 0) {
+      if (state.emptySince != null) {
+        state.emptySince = null;
+        await this.saveState(state);
+      }
+      return;
+    }
+
+    if (state.emptySince == null) {
+      state.emptySince = Date.now();
+      await this.saveState(state);
+      await this.ctx.storage.setAlarm(state.emptySince + ROOM_IDLE_TTL_MS);
+      return;
+    }
+
+    const expiresAt = state.emptySince + ROOM_IDLE_TTL_MS;
+    if (Date.now() < expiresAt) {
+      await this.ctx.storage.setAlarm(expiresAt);
+      return;
+    }
+
+    this.statePromise = Promise.resolve(null);
+    await this.ctx.storage.deleteAll();
   }
 
   async advanceTrack(state) {
@@ -251,7 +310,7 @@ export class MusicRoom extends DurableObject {
   }
 
   async webSocketMessage(socket, rawMessage) {
-    const state = await this.getState();
+    let state = await this.getState();
     if (!state) return;
 
     let message;
@@ -347,11 +406,15 @@ export class MusicRoom extends DurableObject {
 
   async webSocketClose(socket) {
     const state = await this.getState();
-    if (state) this.broadcast(state, socket);
+    if (!state) return;
+    this.broadcast(state, socket);
+    await this.markRoomEmpty(state, socket);
   }
 
   async webSocketError(socket) {
     const state = await this.getState();
-    if (state) this.broadcast(state, socket);
+    if (!state) return;
+    this.broadcast(state, socket);
+    await this.markRoomEmpty(state, socket);
   }
 }
