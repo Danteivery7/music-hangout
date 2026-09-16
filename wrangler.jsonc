@@ -13,16 +13,12 @@
     "bindings": [
       {
         "name": "ROOMS",
-        "class_name": "MusicRoomV2"
+        "class_name": "MusicRoom"
       }
     ]
   },
   "exports": {
     "MusicRoom": {
-      "type": "durable-object",
-      "storage": "sqlite"
-    },
-    "MusicRoomV2": {
       "type": "durable-object",
       "storage": "sqlite"
     }
