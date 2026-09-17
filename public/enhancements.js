@@ -12,12 +12,17 @@
   let capturedPlayer = null;
   let bgFadeFrame = null;
   let bgWanted = false;
+  let bgBlocked = false;
+  let bgStarting = false;
 
-  const bgAudio = new Audio(BG_AUDIO_URL);
+  const bgAudio = new Audio();
+  bgAudio.src = BG_AUDIO_URL;
   bgAudio.loop = true;
   bgAudio.preload = 'auto';
   bgAudio.volume = 0;
+  bgAudio.muted = false;
   bgAudio.setAttribute('aria-hidden', 'true');
+  bgAudio.load();
 
   function savePlayerAudioState() {
     localStorage.setItem(VOLUME_KEY, String(Math.round(playerVolume)));
@@ -154,7 +159,7 @@
       },
     });
   } catch {
-    // If another script made the property non-configurable, polling below still works.
+    // Polling below still catches the player if another script owns the callback.
   }
 
   wrapYouTubePlayer();
@@ -186,42 +191,105 @@
       } else {
         bgFadeFrame = null;
         bgAudio.volume = target;
-        if (pauseAtEnd && target === 0) bgAudio.pause();
+        if (pauseAtEnd && target === 0) {
+          bgAudio.pause();
+          bgAudio.currentTime = 0;
+        }
       }
     };
 
     bgFadeFrame = requestAnimationFrame(step);
   }
 
-  async function startBackground() {
-    if (!bgWanted) return;
+  function removeBackgroundPrompt() {
+    document.querySelector('#background-audio-prompt')?.remove();
+  }
+
+  function ensureBackgroundPrompt() {
+    if (!bgWanted || !bgBlocked || document.querySelector('#background-audio-prompt')) return;
+    const button = document.createElement('button');
+    button.id = 'background-audio-prompt';
+    button.className = 'background-audio-prompt';
+    button.type = 'button';
+    button.innerHTML = `${volumeIcon(false)}<span><strong>Background music</strong><small>Click to play ambience</small></span>`;
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      startBackgroundFromGesture();
+    });
+    document.body.appendChild(button);
+  }
+
+  async function startBackground(fromGesture = false) {
+    if (!bgWanted || bgStarting) return;
+    if (!bgAudio.paused && !bgBlocked) {
+      fadeBackgroundTo(BG_TARGET_VOLUME, 450, false);
+      return;
+    }
+
+    bgStarting = true;
     try {
-      if (bgAudio.paused) await bgAudio.play();
-      if (!bgWanted) return;
-      fadeBackgroundTo(BG_TARGET_VOLUME, 700, false);
-    } catch {
-      // Browsers normally require a user gesture before audible autoplay.
+      bgAudio.muted = false;
+      if (bgAudio.volume > BG_TARGET_VOLUME) bgAudio.volume = 0;
+      const playPromise = bgAudio.play();
+      if (playPromise && typeof playPromise.then === 'function') await playPromise;
+      if (!bgWanted) {
+        bgAudio.pause();
+        return;
+      }
+      bgBlocked = false;
+      removeBackgroundPrompt();
+      fadeBackgroundTo(BG_TARGET_VOLUME, fromGesture ? 420 : 700, false);
+    } catch (error) {
+      bgBlocked = true;
+      if (error?.name !== 'NotAllowedError') console.warn('Background music could not start:', error);
+      ensureBackgroundPrompt();
+    } finally {
+      bgStarting = false;
     }
   }
 
+  function startBackgroundFromGesture() {
+    if (!bgWanted || (!bgAudio.paused && !bgBlocked)) return;
+    startBackground(true);
+  }
+
   function stopBackground() {
+    bgBlocked = false;
+    removeBackgroundPrompt();
+    if (bgAudio.paused) {
+      bgAudio.volume = 0;
+      bgAudio.currentTime = 0;
+      return;
+    }
     fadeBackgroundTo(0, BG_FADE_MS, true);
   }
 
   function syncLandingAudio() {
     const landingVisible = Boolean(document.querySelector('.landing-shell'));
-    if (landingVisible === bgWanted) return;
+    if (landingVisible === bgWanted) {
+      if (landingVisible && bgBlocked) ensureBackgroundPrompt();
+      return;
+    }
     bgWanted = landingVisible;
-    if (landingVisible) startBackground();
+    if (landingVisible) startBackground(false);
     else stopBackground();
   }
 
-  const unlockBackground = () => {
-    if (bgWanted) startBackground();
-  };
-  window.addEventListener('pointerdown', unlockBackground, { passive: true });
-  window.addEventListener('keydown', unlockBackground, { passive: true });
-  window.addEventListener('touchstart', unlockBackground, { passive: true });
+  // Audible autoplay is often blocked. These capture-phase listeners run before
+  // the site's own buttons navigate away, so the very first interaction can
+  // unlock the landing music reliably.
+  document.addEventListener('pointerdown', startBackgroundFromGesture, { capture: true, passive: true });
+  document.addEventListener('touchstart', startBackgroundFromGesture, { capture: true, passive: true });
+  document.addEventListener('keydown', startBackgroundFromGesture, { capture: true });
+
+  bgAudio.addEventListener('canplay', () => {
+    if (bgWanted && bgAudio.paused && !bgStarting) startBackground(false);
+  });
+  bgAudio.addEventListener('error', () => {
+    if (!bgWanted) return;
+    bgBlocked = true;
+    ensureBackgroundPrompt();
+  });
 
   const observer = new MutationObserver(() => {
     ensureVolumeControl();
@@ -248,7 +316,7 @@
   }, 1500);
 
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && bgWanted) startBackground();
+    if (!document.hidden && bgWanted) startBackground(false);
   });
 
   ensureVolumeControl();
