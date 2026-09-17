@@ -1,5 +1,5 @@
 (() => {
-  const BG_AUDIO_URL = 'https://cdn1.suno.ai/ae48d12d-608a-40c2-9f08-4c1c0589d0d8.mp3';
+  const BG_AUDIO_URL = '/api/landing-audio';
   const BG_TARGET_VOLUME = 0.10;
   const BG_FADE_MS = 650;
   const VOLUME_KEY = 'music-hangout-player-volume';
