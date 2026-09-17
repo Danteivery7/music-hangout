@@ -3,6 +3,8 @@ import { DurableObject } from "cloudflare:workers";
 const ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 const ROOM_IDLE_TTL_MS = 30 * 60 * 1000;
+const DIRECTORY_NAME = "__MUSIC_HANGOUT_DIRECTORY__";
+const DIRECTORY_STALE_MS = 24 * 60 * 60 * 1000;
 
 function json(data, init = {}) {
   return new Response(JSON.stringify(data), {
@@ -12,7 +14,7 @@ function json(data, init = {}) {
 }
 
 function cleanRoomCode(value = "") {
-  return value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+  return String(value).toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
 }
 
 function makeRoomCode(length = 6) {
@@ -24,6 +26,15 @@ function makeRoomCode(length = 6) {
 function cleanName(value = "") {
   const normalized = String(value).trim().replace(/\s+/g, " ");
   return normalized.slice(0, 28) || "Guest";
+}
+
+function cleanRoomName(value = "") {
+  const normalized = String(value).trim().replace(/\s+/g, " ");
+  return normalized.slice(0, 48) || "Untitled room";
+}
+
+function cleanVisibility(value = "") {
+  return String(value).toLowerCase() === "private" ? "private" : "public";
 }
 
 function safeTrack(track) {
@@ -48,12 +59,30 @@ export default {
       return json({ ok: true, service: "music-hangout" });
     }
 
+    if (url.pathname === "/api/rooms/browse" && request.method === "GET") {
+      const directory = env.ROOMS.get(env.ROOMS.idFromName(DIRECTORY_NAME));
+      return directory.fetch("https://room.internal/directory/list");
+    }
+
     if (url.pathname === "/api/rooms" && request.method === "POST") {
+      const body = await request.json().catch(() => ({}));
+      const metadata = {
+        roomName: cleanRoomName(body.roomName),
+        visibility: cleanVisibility(body.visibility),
+        creatorName: cleanName(body.creatorName || body.name),
+      };
+
       for (let attempt = 0; attempt < 8; attempt += 1) {
         const roomCode = makeRoomCode();
         const room = env.ROOMS.get(env.ROOMS.idFromName(roomCode));
-        const created = await room.fetch(`https://room.internal/create?room=${encodeURIComponent(roomCode)}`, { method: "POST" });
-        if (created.status === 201) return json({ roomCode }, { status: 201 });
+        const created = await room.fetch(`https://room.internal/create?room=${encodeURIComponent(roomCode)}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(metadata),
+        });
+        if (created.status === 201) {
+          return json({ roomCode, roomName: metadata.roomName, visibility: metadata.visibility }, { status: 201 });
+        }
       }
       return json({ error: "Could not create a room. Try again." }, { status: 503 });
     }
@@ -152,9 +181,10 @@ export class MusicRoom extends DurableObject {
     await this.ctx.storage.put("room", state);
   }
 
-  participants() {
+  participants(except = null) {
     const seen = new Map();
     for (const socket of this.ctx.getWebSockets()) {
+      if (socket === except) continue;
       const attachment = socket.deserializeAttachment();
       if (!attachment?.id) continue;
       seen.set(attachment.id, {
@@ -168,6 +198,10 @@ export class MusicRoom extends DurableObject {
   publicState(state) {
     return {
       roomCode: state.roomCode,
+      roomName: state.roomName || `Room ${state.roomCode}`,
+      visibility: state.visibility || "private",
+      creatorName: state.creatorName || "Guest",
+      browseId: state.browseId || null,
       queue: state.queue,
       current: state.current,
       playback: state.playback,
@@ -188,17 +222,129 @@ export class MusicRoom extends DurableObject {
     }
   }
 
+  async directoryList() {
+    const now = Date.now();
+    const directory = (await this.ctx.storage.get("directory")) || {};
+    let changed = false;
+
+    for (const [code, entry] of Object.entries(directory)) {
+      const expiredByRoom = entry.expiresAt && now > entry.expiresAt + 60_000;
+      const staleFallback = now - Number(entry.updatedAt || entry.createdAt || 0) > DIRECTORY_STALE_MS;
+      if (expiredByRoom || staleFallback) {
+        delete directory[code];
+        changed = true;
+      }
+    }
+
+    if (changed) await this.ctx.storage.put("directory", directory);
+
+    const rooms = Object.entries(directory)
+      .map(([code, entry]) => ({
+        browseId: entry.browseId,
+        roomName: entry.roomName,
+        visibility: entry.visibility,
+        creatorName: entry.creatorName,
+        participants: Number(entry.participants) || 0,
+        currentTitle: entry.currentTitle || null,
+        createdAt: entry.createdAt,
+        updatedAt: entry.updatedAt,
+        roomCode: entry.visibility === "public" ? code : null,
+      }))
+      .sort((a, b) => (b.participants - a.participants) || (b.updatedAt - a.updatedAt));
+
+    return json({ rooms, serverNow: now });
+  }
+
+  async registerDirectoryEntry(request) {
+    const incoming = await request.json().catch(() => null);
+    const roomCode = cleanRoomCode(incoming?.roomCode);
+    if (!roomCode) return new Response(null, { status: 400 });
+    const directory = (await this.ctx.storage.get("directory")) || {};
+    directory[roomCode] = {
+      browseId: String(incoming.browseId || ""),
+      roomName: cleanRoomName(incoming.roomName),
+      visibility: cleanVisibility(incoming.visibility),
+      creatorName: cleanName(incoming.creatorName),
+      participants: Math.max(0, Number(incoming.participants) || 0),
+      currentTitle: String(incoming.currentTitle || "").slice(0, 180) || null,
+      createdAt: Number(incoming.createdAt) || Date.now(),
+      updatedAt: Date.now(),
+      expiresAt: incoming.expiresAt == null ? null : Number(incoming.expiresAt) || null,
+    };
+    await this.ctx.storage.put("directory", directory);
+    return new Response(null, { status: 204 });
+  }
+
+  async unregisterDirectoryEntry(request) {
+    const incoming = await request.json().catch(() => null);
+    const roomCode = cleanRoomCode(incoming?.roomCode);
+    if (!roomCode) return new Response(null, { status: 400 });
+    const directory = (await this.ctx.storage.get("directory")) || {};
+    if (directory[roomCode]) {
+      delete directory[roomCode];
+      await this.ctx.storage.put("directory", directory);
+    }
+    return new Response(null, { status: 204 });
+  }
+
+  async updateDirectory(state, except = null) {
+    if (!state?.roomCode) return;
+    const directory = this.env.ROOMS.get(this.env.ROOMS.idFromName(DIRECTORY_NAME));
+    const participants = this.participants(except).length;
+    const expiresAt = state.emptySince != null ? state.emptySince + ROOM_IDLE_TTL_MS : null;
+    await directory.fetch("https://room.internal/directory/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        roomCode: state.roomCode,
+        browseId: state.browseId,
+        roomName: state.roomName,
+        visibility: state.visibility,
+        creatorName: state.creatorName,
+        participants,
+        currentTitle: state.current?.title || null,
+        createdAt: state.createdAt,
+        expiresAt,
+      }),
+    });
+  }
+
+  async unregisterDirectory(state) {
+    if (!state?.roomCode) return;
+    const directory = this.env.ROOMS.get(this.env.ROOMS.idFromName(DIRECTORY_NAME));
+    await directory.fetch("https://room.internal/directory/unregister", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ roomCode: state.roomCode }),
+    });
+  }
+
   async fetch(request) {
     const url = new URL(request.url);
+
+    if (url.pathname === "/directory/list" && request.method === "GET") {
+      return this.directoryList();
+    }
+    if (url.pathname === "/directory/register" && request.method === "POST") {
+      return this.registerDirectoryEntry(request);
+    }
+    if (url.pathname === "/directory/unregister" && request.method === "POST") {
+      return this.unregisterDirectoryEntry(request);
+    }
 
     if (url.pathname === "/create" && request.method === "POST") {
       const existing = await this.getState();
       if (existing) return new Response(null, { status: 409 });
 
+      const metadata = await request.json().catch(() => ({}));
       const roomCode = cleanRoomCode(url.searchParams.get("room") || request.headers.get("x-room-code") || "");
       const fallbackCode = this.ctx.id.toString().slice(0, 6).toUpperCase();
       const state = {
         roomCode: roomCode || fallbackCode,
+        roomName: cleanRoomName(metadata.roomName),
+        visibility: cleanVisibility(metadata.visibility),
+        creatorName: cleanName(metadata.creatorName),
+        browseId: crypto.randomUUID(),
         createdAt: Date.now(),
         emptySince: Date.now(),
         queue: [],
@@ -211,6 +357,7 @@ export class MusicRoom extends DurableObject {
       };
       await this.saveState(state);
       await this.ctx.storage.setAlarm(state.emptySince + ROOM_IDLE_TTL_MS);
+      await this.updateDirectory(state);
       return new Response(null, { status: 201 });
     }
 
@@ -221,7 +368,7 @@ export class MusicRoom extends DurableObject {
     }
 
     if (url.pathname === "/ws") {
-      let state = await this.getState();
+      const state = await this.getState();
       if (!state) return new Response("Room not found", { status: 404 });
 
       const pair = new WebSocketPair();
@@ -243,6 +390,7 @@ export class MusicRoom extends DurableObject {
 
       server.send(JSON.stringify({ type: "welcome", participantId: participant.id }));
       this.broadcast(state);
+      await this.updateDirectory(state);
 
       return new Response(null, { status: 101, webSocket: client });
     }
@@ -257,7 +405,7 @@ export class MusicRoom extends DurableObject {
   }
 
   async markRoomEmpty(state, except = null) {
-    if (!state || this.connectedCount(except) > 0) return;
+    if (!state || this.connectedCount(except) > 0) return false;
 
     const now = Date.now();
     if (state.current && state.playback.status === "playing") {
@@ -268,6 +416,8 @@ export class MusicRoom extends DurableObject {
     state.emptySince = now;
     await this.saveState(state);
     await this.ctx.storage.setAlarm(now + ROOM_IDLE_TTL_MS);
+    await this.updateDirectory(state, except);
+    return true;
   }
 
   async alarm() {
@@ -279,6 +429,7 @@ export class MusicRoom extends DurableObject {
         state.emptySince = null;
         await this.saveState(state);
       }
+      await this.updateDirectory(state);
       return;
     }
 
@@ -286,15 +437,18 @@ export class MusicRoom extends DurableObject {
       state.emptySince = Date.now();
       await this.saveState(state);
       await this.ctx.storage.setAlarm(state.emptySince + ROOM_IDLE_TTL_MS);
+      await this.updateDirectory(state);
       return;
     }
 
     const expiresAt = state.emptySince + ROOM_IDLE_TTL_MS;
     if (Date.now() < expiresAt) {
       await this.ctx.storage.setAlarm(expiresAt);
+      await this.updateDirectory(state);
       return;
     }
 
+    await this.unregisterDirectory(state);
     this.statePromise = Promise.resolve(null);
     await this.ctx.storage.deleteAll();
   }
@@ -307,10 +461,11 @@ export class MusicRoom extends DurableObject {
       : { status: "idle", startedAt: null, pausedAt: 0 };
     await this.saveState(state);
     this.broadcast(state);
+    await this.updateDirectory(state);
   }
 
   async webSocketMessage(socket, rawMessage) {
-    let state = await this.getState();
+    const state = await this.getState();
     if (!state) return;
 
     let message;
@@ -347,6 +502,7 @@ export class MusicRoom extends DurableObject {
       }
       await this.saveState(state);
       this.broadcast(state);
+      await this.updateDirectory(state);
       return;
     }
 
@@ -408,13 +564,15 @@ export class MusicRoom extends DurableObject {
     const state = await this.getState();
     if (!state) return;
     this.broadcast(state, socket);
-    await this.markRoomEmpty(state, socket);
+    const becameEmpty = await this.markRoomEmpty(state, socket);
+    if (!becameEmpty) await this.updateDirectory(state, socket);
   }
 
   async webSocketError(socket) {
     const state = await this.getState();
     if (!state) return;
     this.broadcast(state, socket);
-    await this.markRoomEmpty(state, socket);
+    const becameEmpty = await this.markRoomEmpty(state, socket);
+    if (!becameEmpty) await this.updateDirectory(state, socket);
   }
 }
