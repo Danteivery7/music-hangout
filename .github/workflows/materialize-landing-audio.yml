@@ -35,7 +35,12 @@ jobs:
         if: steps.existing.outputs.ready != 'true'
         shell: bash
         run: |
-          curl --fail --location --retry 3 --output /tmp/landing.mp3 "https://cdn1.suno.ai/ae48d12d-608a-40c2-9f08-4c1c0589d0d8.mp3"
+          curl --fail --location --retry 3 \
+            --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/152.0.0.0 Safari/537.36" \
+            --header "Referer: https://suno.com/" \
+            --header "Accept: audio/mpeg,audio/*;q=0.9,*/*;q=0.8" \
+            --output /tmp/landing.mp3 \
+            "https://cdn1.suno.ai/ae48d12d-608a-40c2-9f08-4c1c0589d0d8.mp3"
           ACTUAL=$(sha256sum /tmp/landing.mp3 | awk '{print $1}')
           EXPECTED="437b240e2b3f0e749cf0a7114e6f3728cd789b48111976a55ea2419447345b9e"
           if [ "$ACTUAL" != "$EXPECTED" ]; then
