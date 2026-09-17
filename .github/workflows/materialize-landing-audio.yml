@@ -1,0 +1,57 @@
+name: Materialize landing audio
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/materialize-landing-audio.yml
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Stop if the exact local audio is already committed
+        id: existing
+        shell: bash
+        run: |
+          if [ -f "public/Late Night Polish.mp3" ]; then
+            HASH=$(sha256sum "public/Late Night Polish.mp3" | awk '{print $1}')
+            if [ "$HASH" = "437b240e2b3f0e749cf0a7114e6f3728cd789b48111976a55ea2419447345b9e" ]; then
+              echo "ready=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "ready=false" >> "$GITHUB_OUTPUT"
+
+      - name: Materialize exact MP3 bytes
+        if: steps.existing.outputs.ready != 'true'
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 --output /tmp/landing.mp3 "https://cdn1.suno.ai/ae48d12d-608a-40c2-9f08-4c1c0589d0d8.mp3"
+          ACTUAL=$(sha256sum /tmp/landing.mp3 | awk '{print $1}')
+          EXPECTED="437b240e2b3f0e749cf0a7114e6f3728cd789b48111976a55ea2419447345b9e"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "Downloaded bytes do not match the MP3 uploaded by the user. Refusing to commit."
+            echo "Expected: $EXPECTED"
+            echo "Actual:   $ACTUAL"
+            exit 1
+          fi
+          mv /tmp/landing.mp3 "public/Late Night Polish.mp3"
+
+      - name: Commit exact MP3 into repository
+        if: steps.existing.outputs.ready != 'true'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "public/Late Night Polish.mp3"
+          git commit -m "Add uploaded landing background MP3"
+          git push
